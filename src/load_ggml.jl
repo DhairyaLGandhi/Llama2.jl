@@ -176,6 +176,8 @@ struct TransformerLayer{A, N, F}
     # forw
 end
 
+Flux.@layer TransformerLayer
+
 struct AttentionLayer{Q,K,V,O}
     wq::Q
     wk::K
@@ -185,18 +187,26 @@ struct AttentionLayer{Q,K,V,O}
     # head_size::HS
 end
 
+Flux.@layer AttentionLayer
+
 struct AttentionRMSNorm{W}
     weight::W
 end
+
+Flux.@layer AttentionRMSNorm
 
 struct FFN{L, N}
     layers::L
     norm::N
 end
 
+Flux.@layer FFN
+
 struct FFNRMSNorm{W}
     weight::W
 end
+
+Flux.@layer FFNRMSNorm
 
 # FullModel => TransformerWeights
 struct FullModel{T, N, O, TL}
@@ -205,6 +215,8 @@ struct FullModel{T, N, O, TL}
     output_weight::O
     transformer_layers::TL
 end
+
+Flux.@layer FullModel
 
 function TransformerWeights(ggml_dict::Dict{String,Any}, layer_count::Int)
     layers = [TransformerLayerWeights(ggml_dict, 1)]

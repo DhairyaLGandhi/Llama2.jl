@@ -5,7 +5,6 @@ version = "0.1.0"
 
 [deps]
 BandedMatrices = "aae01518-5342-5314-be14-df237901396f"
-DaggerFlux = "30118311-1c65-4ba6-a61e-753b8f31dbc8"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
 Flux = "587475ba-b771-5e3f-ad9e-33799f191a9c"
 HuggingFaceApi = "3cc741c3-0c9d-4fbe-84fa-cdec264173de"
