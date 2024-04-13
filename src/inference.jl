@@ -180,10 +180,6 @@ function combine_values!(xb, value_cache, att)
     return xb
 end
 
-norm_vals = Float32[]
-x_vals = Float32[]
-rms_vals = Float32[]
-
 @views function transformer!(token::Int, pos::Int, config::ModelConfig, s::RunState, weights::TransformerWeights)
     x = s.x
 
