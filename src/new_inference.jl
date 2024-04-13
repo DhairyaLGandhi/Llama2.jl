@@ -6,9 +6,7 @@ function Flux.Zygote.ChainRules.rrule(::typeof(reinterpret), ::Type{T}, x::Abstr
 end
 
 function rope2(wx, pos::Int)
-    global gwx = wx
     cwx = reinterpret(ComplexF32, wx)
-    # cwx = ComplexF32.(wx)
     head_size_div2, n_heads = size(cwx)
     
     freq_base = 10000.0f0
@@ -17,23 +15,14 @@ function rope2(wx, pos::Int)
     theta_scale = freq_base ^ (-inv(Float32(head_size_div2)))
     theta = freq_scale * (pos - 1)
 
-    # @show theta
-    # theta_mat = zeros(head_size_div2, n_heads)
-    # scales = [theta ; theta_scale .^ (1:head_size_div2-1)]
     scales = theta_scale .^ (0:(head_size_div2-1))
     thetas = theta .* scales
 
-    # @show theta
-    # @show size(wx)
-    # @show size(thetas)
     reinterpret(Float32, cwx .* cis.(thetas))
-    # thetas
 end
 
 function rope2(wx, positions::AbstractVector)
-    # @show size(wx)
     pes = map(pos -> rope2(wx, pos), positions)
-    # @show size.(pes)
     cat(pes..., dims = 3)
 end
 
@@ -59,8 +48,6 @@ function (attn::AttentionLayer)(x, kv, pos::Int)
     k = attn.wk' * x
     v = attn.wv' * x
 
-    # @show size(x)
-    
     head_size, n_heads = (64, 8) # attn.head_size, attn.n_heads # (64, 8)
     q_reshaped = reshape(q, head_size, n_heads)
     k_reshaped = reshape(k, head_size, n_heads)
@@ -68,15 +55,6 @@ function (attn::AttentionLayer)(x, kv, pos::Int)
     # apply RoPE rotation to the q and k vectors for each head
     q_ = rope2(q_reshaped, pos)
     k_ = rope2(k_reshaped, 1:pos)
-    # global gk2 = k_
-    # @show size(k_)
-    # @show size(kv.key_cache)
-
-    # needs to get the k from previous 1:pos time steps
-    # copyto!(kv.key_cache[:, :, pos], k_)
-    # all_keys = rope2(kv.key_cache, 1:pos)
-    # @show size(all_keys)
-    # att = reshape(s.att[1:(n_heads*pos)], pos, n_heads)
 
     # multihead attention
     att = attention_weights2(pos, k_, q_)
@@ -84,33 +62,18 @@ function (attn::AttentionLayer)(x, kv, pos::Int)
     att = Flux.softmax(att)
 
 
-
-    myview = @view kv.value_cache[pos, :, :]
-    copyto!(myview, v)
-    # @show sum(kv.value_cache)
+    Flux.Zygote.ignore() do
+        myview = @view kv.value_cache[pos, :, :]
+        copyto!(myview, v)
+    end
 
     # weighted sum of the values
     xb = combine_values2(kv.value_cache, att)
 
-    # @show sum(xb)
-
     # final matmul to get the output of the attention
-    # matmul!(s.xb2, w.wo, s.xb)
-
-    global gv_new = v
-    global gatt_new = att
-    global gxb_new = xb
-
-    # @show size(attn.wo)
     xb2 = attn.wo' * vec(xb)
 
-    global gxb2_new = xb2
-    # @show sum(xb2)
     xb2
-
-    # att, v
-
-    # q_, k_, v
 end
 
 attention_weights2(att, key_cache, q) = attention_weights2(size(att, 1), key_cache, q)
@@ -154,9 +117,6 @@ function (layer::TransformerLayer)(x, kv, pos)
     # final matmul to get the output of the ffn
     xb_out = layer.ffn.layers[2](hb .* hb2)
 
-    # @show sum(xb_out)
-    # pos == 1 && error()
-
     # residual connection
     (x .+ xb_out, kv, pos)
 end
@@ -189,7 +149,6 @@ end
     # classifier into logits
     logits = model.output_weight' * x_norm
     copyto!(s.logits, logits)
-    # @show sum(s.logits)
 
     return nothing
 end
