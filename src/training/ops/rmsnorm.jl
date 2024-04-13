@@ -29,6 +29,8 @@ function forward!(op::RmsNormOp)
     w = op.weights.value
     tmp = op.tmp
 
+    @show size(x)
+    @show size(tmp)
     @turbo for n in axes(x, 2)
         s = zero(eltype(x))
         for i in axes(x, 1)

@@ -4,7 +4,12 @@ authors = ["Lukas Mayrhofer <lukas.mayrhofer@tum.de>"]
 version = "0.1.0"
 
 [deps]
+BandedMatrices = "aae01518-5342-5314-be14-df237901396f"
+DaggerFlux = "30118311-1c65-4ba6-a61e-753b8f31dbc8"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
+Flux = "587475ba-b771-5e3f-ad9e-33799f191a9c"
+HuggingFaceApi = "3cc741c3-0c9d-4fbe-84fa-cdec264173de"
+InteractiveUtils = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 LoopVectorization = "bdcacae8-1622-11e9-2a5c-532679323890"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"

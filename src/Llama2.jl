@@ -8,6 +8,7 @@ using SIMD
 using LoopVectorization
 using Random
 using Distributions
+using Flux
 
 export ModelConfig, CharTokenizer, LanguageModel
 export load_ggml_model, load_karpathy_model, encode, sample
@@ -44,5 +45,10 @@ include("training/ops/rmsnorm.jl")
 include("training/ops/rope.jl")
 include("training/ops/softmax.jl")
 include("training/model.jl")
+
+include("quantization/deq.jl")
+
+
+include("new_inference.jl")
 
 end # module Llama2

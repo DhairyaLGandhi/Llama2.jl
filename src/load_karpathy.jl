@@ -80,17 +80,20 @@ function load_karpathy_model(
         tokenizer_filename::AbstractString,
     )
 
-    config = nothing
-    weights = nothing
+    # config = nothing
+    # weights = nothing
 
     # read in the model.bin file
-    open(checkpoint_filename) do file
+    config, weights = open(checkpoint_filename) do file
         config = read_karpathy_config(file)
         weights = read_karpathy_weights(file, config)
+        config, weights
     end
 
     # read in the tokenizer.bin file
     tokenizer = load_karpathy_tokenizer(tokenizer_filename, config.vocab_size)
 
-    return LanguageModel(config, tokenizer, weights)
+    new_weights = make_new_weights(weights)
+    
+    return LanguageModel(config, tokenizer, weights), LanguageModel(config, tokenizer, new_weights)
 end

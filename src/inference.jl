@@ -43,7 +43,8 @@ end
     output_weight::Matrix{OW} # (dim, vocab_size)
 end
 
-struct LanguageModel{TOK<:Tokenizer,W<:TransformerWeights}
+# struct LanguageModel{TOK<:Tokenizer,W<:TransformerWeights}
+struct LanguageModel{TOK<:Tokenizer,W}
     config::ModelConfig
     tokenizer::TOK
     weights::W
@@ -105,43 +106,78 @@ function rmsnorm!(o, x, weight)
     return nothing
 end
 
-function rope!(x::AbstractMatrix{Float32}, pos::Int)
+rope(x, pos) = rope!(copy(x), x, pos)
+rope!(x, pos) = rope!(copy(x), x, pos)
+function rope!(x::AbstractMatrix{Float32}, x_, pos::Int)
     x = reinterpret(ComplexF32, x)
+    # x_copy = deepcopy(x)
     head_size_div2, n_heads = size(x)
 
     freq_base = 10000.0f0
     freq_scale = 1.0f0
 
-    theta_scale = freq_base ^ (-inv(Float32(head_size_div2)))
+    # thetas = []
 
+    theta_scale = freq_base ^ (-inv(Float32(head_size_div2)))
+    # @show size(x)
+    # @show freq_scale
     @inbounds for head in 1:n_heads
         theta = freq_scale * (pos - 1)
-
+        # count = 0
+        # col_thetas = []
+        # @show theta, pos
         for i in 1:head_size_div2
+            # push!(col_thetas, theta)
             x[i, head] *= cis(theta)
             theta *= theta_scale
+            # count += 1
+            # @show theta
+            
         end
+        # push!(thetas, col_thetas)
+        # @show count
     end
 
-    return nothing
+    global fx = x
+    # return nothing
+    # reduce(hcat, thetas)
+    x
+    # x_copy .* reduce(hcat, thetas)
 end
 
 function softmax!(x)
+    global gx = copy(x)
     x .= exp.(x .- maximum(x))
     # normalize
     x ./= sum(x)
+    global ggx = copy(x)
     return nothing
 end
 
+# attention_weights!(att, key_cache, q) = attention_weights(att, key_cache, q)
+# function attention_weights(att, key_cache, q)
+#     attention_weights!(copy(att), att, key_cache, q)
+# end
 function attention_weights!(att, key_cache, q)
+    # @show size(att), size(q)
+    # @show size(key_cache)
+    global gatt = copy(att)
+    global gq = copy(q)
+    global gkv = copy(key_cache)
     @inbounds @fastmath for h in axes(att, 2)
         for t in axes(att, 1)
             s = 0f0
 
+            # what the column is calculating
             for i in axes(q, 1)
+                # key cache will go only as far as the position we are at
+                # this is the first dim of att
+                # key_cache is (head_size, n_heads, seq_len)
+                # q is (head_size, n_heads)
                 s += q[i, h] * key_cache[i, h, t]
             end
 
+            # column of att
             att[t, h] = s
         end
     end
@@ -149,6 +185,7 @@ function attention_weights!(att, key_cache, q)
     return att
 end
 
+# combine_values!(xb, value_cache, att) = combine_values!(copy(xb), xb, value_cache, att)
 function combine_values!(xb, value_cache, att)
     @inbounds @fastmath for h in axes(xb, 2)
         for i in axes(xb, 1)
@@ -165,6 +202,10 @@ function combine_values!(xb, value_cache, att)
     return xb
 end
 
+norm_vals = Float32[]
+x_vals = Float32[]
+rms_vals = Float32[]
+
 @views function transformer!(token::Int, pos::Int, config::ModelConfig, s::RunState, weights::TransformerWeights)
     x = s.x
 
@@ -179,6 +220,7 @@ end
 
     # copy the token embedding into x
     dequantize!(x, weights.token_embedding_table[:, token])
+    push!(x_vals, sum(x))
 
     # forward all the layers
     for l in 1:n_layers
@@ -192,69 +234,108 @@ end
         matmul!(s.q, w.wq, s.xb)
         matmul!(s.k, w.wk, s.xb)
         matmul!(s.v, w.wv, s.xb)
-
+        
+        # @show head_size, n_heads
         q = reshape(s.q, head_size, n_heads)
         k = reshape(s.k, head_size, n_heads)
-
+        # @show sum(s.q), sum(s.k), sum(s.v)
+        global gk = copy(k)
+        
         # apply RoPE rotation to the q and k vectors for each head
         rope!(q, pos)
         rope!(k, pos)
-
+        
         # save key,value at this time step (pos) to our kv cache
+        # @show size(s.k), size(k)
+        # @show size(kv.key_cache)
+        # @show size(s.att)
         copyto!(kv.key_cache[:, :, pos], s.k)
         copyto!(kv.value_cache[pos, :, :], s.v)
+        global gk_after_rope = copy(k)
+        # pos == 1 && error()
 
+        
         # take a contiguous slice of the attention buffer
         att = reshape(s.att[1:(n_heads*pos)], pos, n_heads)
-
+        # @show size(att)
+        global gq = q
+        global gkv = kv.key_cache
+        # @show size(att)
+        
         # multihead attention
         attention_weights!(att, kv.key_cache, q)
-
+        
         att ./= sqrt(Float32(head_size))
-
+        
         for h in 1:n_heads
             # softmax the scores to get attention weights
             softmax!(att[:, h])
         end
-
+        
         xb = reshape(s.xb, head_size, n_heads)
 
+        global gxb = copy(xb)
+        global gatt = att
+        global gkv2 = kv.value_cache
+        global gv = s.v
+        # pos == 1 && error()
+        
         # weighted sum of the values
         combine_values!(xb, kv.value_cache, att)
-
+        
+        
         # final matmul to get the output of the attention
         matmul!(s.xb2, w.wo, s.xb)
-
+        # @show "here"
+        # @show sum(xb)
+        # @show sum(s.xb2)
+        global gxb = copy(s.xb)
+        global gxb2 = copy(s.xb2)
+        global gatt = att
+        global gv = s.v
+        
         # residual connection back into x
         x .+= s.xb2
-
+        
         # ffn rmsnorm
         rmsnorm!(s.xb, x, w.rms_ffn_weight)
+        # @show "ffn norm" sum(s.xb)
 
         # Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
         # first calculate self.w1(x) and self.w3(x)
         matmul!(s.hb, w.w1, s.xb)
         matmul!(s.hb2, w.w3, s.xb)
 
+        # @show size(s.hb) hidden_dim
         # F.silu silu(x)=x*σ(x),where σ(x) is the logistic sigmoid
         for i in 1:hidden_dim
             s.hb[i] = s.hb[i] * (1f0 / (1f0 + exp(-s.hb[i])))
         end
+
+        global ghb = copy(s.hb)
+        global ghb2 = copy(s.hb2)
 
         s.hb .*= s.hb2
 
         # final matmul to get the output of the ffn
         matmul!(s.xb, w.w2, s.hb)
 
+        # @show sum(s.xb)
+        # @show "now heere"
+        
+        
         # residual connection
         x .+= s.xb
     end
-
+    
+    global gx_out = copy(x)
+    # pos == 1 && error()
     # final rmsnorm
     rmsnorm!(x, x, weights.rms_final_weight)
 
     # classifier into logits
     matmul!(s.logits, weights.output_weight, x)
+    # @show sum(s.logits)
 
     return nothing
 end
@@ -296,6 +377,7 @@ function sample(
 
     for pos in 1:min(config.seq_len, max_seq_len)
         # forward the transformer to get logits for the next token
+
         transformer!(token, pos, config, state, weights)
         generated_seq_len += 1
 
