@@ -125,145 +125,23 @@ function TransformerLayerWeights(ggml_dict::Dict{String,Any}, layer_index::Int)
     )
 end
 
-function TransformerLayerWeights(ggml_dict::Dict{String,Any}, layer_index::Int)
-    if !haskey(ggml_dict, "layers.$(layer_index-1).attention.wq.weight")
-        error("missing layers.$(layer_index-1) weights")
-    end
 
-    # return TransformerLayerWeights(;
-    #     rms_att_weight = ggml_dict["layers.$(layer_index-1).attention_norm.weight"],
-    #     rms_ffn_weight = ggml_dict["layers.$(layer_index-1).ffn_norm.weight"],
-    #     wq             = ggml_dict["layers.$(layer_index-1).attention.wq.weight"],
-    #     wk             = ggml_dict["layers.$(layer_index-1).attention.wk.weight"],
-    #     wv             = ggml_dict["layers.$(layer_index-1).attention.wv.weight"],
-    #     wo             = ggml_dict["layers.$(layer_index-1).attention.wo.weight"],
-    #     w1             = ggml_dict["layers.$(layer_index-1).feed_forward.w1.weight"],
-    #     w2             = ggml_dict["layers.$(layer_index-1).feed_forward.w2.weight"],
-    #     w3             = ggml_dict["layers.$(layer_index-1).feed_forward.w3.weight"],
-    # )
-
-    attention = AttentionLayer(
-        ggml_dict["layers.$(layer_index-1).attention.wq.weight"],
-        ggml_dict["layers.$(layer_index-1).attention.wk.weight"],
-        ggml_dict["layers.$(layer_index-1).attention.wv.weight"],
-        ggml_dict["layers.$(layer_index-1).attention.wo.weight"],
-
-    )
-
-    attention_rms = AttentionRMSNorm(
-        ggml_dict["layers.$(layer_index-1).attention_norm.weight"],
-    )
-
-    nn = Chain(
-        Dense(ggml_dict["layers.$(layer_index-1).feed_forward.w1.weight"]),
-        Dense(ggml_dict["layers.$(layer_index-1).feed_forward.w2.weight"]),
-        Dense(ggml_dict["layers.$(layer_index-1).feed_forward.w3.weight"]),
-    )
-
-    nn_norm = FFNRMSNorm(
-        ggml_dict["layers.$(layer_index-1).ffn_norm.weight"],
-    )
-    ffn = FFN(nn, nn_norm)
-
-    return TransformerLayer(attention, attention_rms, ffn)
+struct NewTransformerModel{T}
+    chain::T
 end
-
-# TransformerLayer => TransformerLayerWeights
-struct TransformerLayer{A, N, F}
-    attention::A
-    attention_rms::N
-    ffn::F
-    # forw
-end
-
-Flux.@layer TransformerLayer
-
-struct AttentionLayer{Q,K,V,O}
-    wq::Q
-    wk::K
-    wv::V
-    wo::O
-    # n_heads::NH
-    # head_size::HS
-end
-
-Flux.@layer AttentionLayer
-
-struct AttentionRMSNorm{W}
-    weight::W
-end
-
-Flux.@layer AttentionRMSNorm
-
-struct FFN{L, N}
-    layers::L
-    norm::N
-end
-
-Flux.@layer FFN
-
-struct FFNRMSNorm{W}
-    weight::W
-end
-
-Flux.@layer FFNRMSNorm
-
-# FullModel => TransformerWeights
-struct FullModel{T, N, O, TL}
-    token_embedding_table::T
-    rms_final_weight::N
-    output_weight::O
-    transformer_layers::TL
-end
-
-Flux.@layer FullModel
-
-function TransformerWeights(ggml_dict::Dict{String,Any}, layer_count::Int)
-    layers = [TransformerLayerWeights(ggml_dict, 1)]
-
-    for i in 2:layer_count
-        push!(layers, TransformerLayerWeights(ggml_dict, i))
-    end
-
-
-    return TransformerWeights(;
-        token_embedding_table = ggml_dict["tok_embeddings.weight"],
-        rms_final_weight      = ggml_dict["norm.weight"],
-        output_weight         = ggml_dict["output.weight"],
-        layers,
-    )
-end
-
-function TransformerWeights(ggml_dict::Dict{String,Any}, layer_count::Int)
-    layers = [TransformerLayerWeights(ggml_dict, 1)]
-
-    for i in 2:layer_count
-        push!(layers, TransformerLayerWeights(ggml_dict, i))
-    end
-
-    token_embedding_table = ggml_dict["tok_embeddings.weight"],
-    rms_final_weight      = ggml_dict["norm.weight"],
-    output_weight         = ggml_dict["output.weight"],
-
-    return FullModel(
-        token_embedding_table,
-        rms_final_weight,
-        output_weight,
-        layers,
-    )
-end
-
 
 function make_new_layers(layers::Vector{<:TransformerLayerWeights})
-    return Chain([make_new_layer(l) for l in layers]...)
+    return NewTransformerModel(Chain([make_new_layer(l) for l in layers]...))
 end
 
 function make_new_layer(l::TransformerLayerWeights)
+    cache = reshape(zero(l.wq), size(l.wq)..., 1)
     attention = AttentionLayer(
         l.wq,
         l.wk,
         l.wv,
         l.wo,
+        cache
     )
 
     attention_rms = AttentionRMSNorm(
