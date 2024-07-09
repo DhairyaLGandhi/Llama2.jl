@@ -130,18 +130,22 @@ struct NewTransformerModel{T}
     chain::T
 end
 
-function make_new_layers(layers::Vector{<:TransformerLayerWeights})
-    return NewTransformerModel(Chain([make_new_layer(l) for l in layers]...))
+Flux.@layer NewTransformerModel
+
+function make_new_layers(layers::Vector{<:TransformerLayerWeights}, config::ModelConfig)
+    # return Chain([make_new_layer(l, config) for l in layers]...)
+    return NewTransformerModel(Chain([make_new_layer(l, config) for l in layers]...))
 end
 
-function make_new_layer(l::TransformerLayerWeights)
-    cache = reshape(zero(l.wq), size(l.wq)..., 1)
+function make_new_layer(l::TransformerLayerWeights, config::ModelConfig)
     attention = AttentionLayer(
         l.wq,
         l.wk,
         l.wv,
         l.wo,
-        cache
+        config.n_heads,
+        config.seq_len,
+        config.dim,
     )
 
     attention_rms = AttentionRMSNorm(
@@ -162,10 +166,10 @@ function make_new_layer(l::TransformerLayerWeights)
     return TransformerLayer(attention, attention_rms, ffn)
 end
 
-function make_new_weights(t::TransformerWeights)
-    layers = make_new_layers(t.layers)
+function make_new_weights(t::TransformerWeights, config::ModelConfig)
+    layers = make_new_layers(t.layers, config)
     FullModel(
-        t.token_embedding_table,
+        Dense(t.token_embedding_table),
         t.rms_final_weight,
         t.output_weight,
         layers,
