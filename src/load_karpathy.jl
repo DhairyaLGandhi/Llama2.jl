@@ -93,7 +93,7 @@ function load_karpathy_model(
     # read in the tokenizer.bin file
     tokenizer = load_karpathy_tokenizer(tokenizer_filename, config.vocab_size)
 
-    new_weights = make_new_weights(weights)
+    new_weights = make_new_weights(weights, config)
     
     return LanguageModel(config, tokenizer, weights), LanguageModel(config, tokenizer, new_weights)
 end
