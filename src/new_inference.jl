@@ -54,14 +54,15 @@ end
 
 Flux.@layer TransformerLayer
 
-struct AttentionLayer{Q,K,V,O, C}
+struct AttentionLayer{Q,K,V,O,NH,S,D}
     wq::Q
     wk::K
     wv::V
     wo::O
-    # n_heads::NH
+    n_heads::NH
+    seq_len::S
+    dim::D
     # head_size::HS
-    cache::C
 end
 
 Flux.@layer AttentionLayer
@@ -134,6 +135,10 @@ function Flux.Zygote.ChainRules.rrule(::typeof(reinterpret), ::Type{T}, x::Abstr
     return reinterpret(T, x), Δ -> (Flux.Zygote.ChainRules.NoTangent(), Flux.Zygote.ChainRules.NoTangent(), reinterpret(S, Δ),)
 end
 
+
+training_aware_rope2(wx, pos::Int) = training_aware_rope2(wx, training_aware_pos(wx, pos))
+training_aware_rope2(wx, pos::AbstractVector) = rope2(wx, pos)
+training_aware_rope2(wx::AbstractMatrix, pos::Int) = rope2(wx, pos)
 function rope2(wx, pos::Int)
     cwx = reinterpret(ComplexF32, wx)
     head_size_div2, n_heads = size(cwx)
@@ -150,6 +155,10 @@ function rope2(wx, pos::Int)
     reinterpret(Float32, cwx .* cis.(thetas))
 end
 
+training_aware_pos(cwx::AbstractArray{T, 4}, positions) where T = 1:size(cwx, 3)
+training_aware_pos(cwx, positions) where T = positions
+
+rope2(wx, ::Nothing) = rope2(wx, 1:size(wx, 3))
 function rope2(wx, positions::AbstractVector)
 
     cwx = reinterpret(ComplexF32, wx)
@@ -159,75 +168,111 @@ function rope2(wx, positions::AbstractVector)
     freq_scale = 1.0f0
 
     theta_scale = freq_base ^ (-inv(Float32(head_size_div2)))
-    theta = freq_scale .* (positions .- 1)
+    theta = freq_scale .* (training_aware_pos(cwx, positions) .- 1)
 
-    # scales = theta_scale .^ (0:(head_size_div2-1))
+    scales = theta_scale .^ (0:(head_size_div2-1))
 
-    scales = foldl(0:(head_size_div2-1), init = 1.f0) do x, y
-        [x; theta_scale * last(x)]
-    end[1:end-1]
-
-    thetas = reshape(theta' .* scales, head_size_div2, 1, :)
+    ts = theta' .* scales
+    s1, s2 = size(ts)
+    thetas = reshape(ts, s1, 1, s2, 1)
     res = reinterpret(Float32, cwx .* cis.(thetas))
     res
 end
 
 function (anorm::AttentionRMSNorm)(x)
-    ss = inv.(sqrt.((dot(x, x) ./ length(x)) .+ 1f-5))
-    anorm.weight .* ss .* x
+    s = size(x, 1)
+    d = sum(x .^ 2, dims = 1)'
+    ss = inv.(sqrt.((d ./ s) .+ 1f-5))
+
+    res = (ss' .* anorm.weight) .* x
+    res
 end
 
 function (ffnnorm::FFNRMSNorm)(x)
-    ss = inv.(sqrt.((dot(x, x) ./ length(x)) .+ 1f-5))
-    ffnnorm.weight .* ss .* x
+    s = size(x, 1)
+    d = sum(x .^ 2, dims = 1)'
+    ss = inv.(sqrt.((d ./ s) .+ 1f-5))
+    
+    (ss' .* ffnnorm.weight) .* x
 end
 
 function rmsnorm(x, weight)
-    ss = inv.(sqrt.((dot(x, x) ./ length(x)) .+ 1f-5))
-    weight .* ss .* x
+    s = size(x, 1)
+    d = sum(x .^ 2, dims = 1)'
+    ss = inv.(sqrt.((d ./ s) .+ 1f-5))
+
+    (ss' .* weight) .* x
 end
 
 silu(x) = x .* sigmoid.(x)
 
-function (attn::AttentionLayer)(x, kv, pos::Int)
-    q = attn.wq' * x
-    k = attn.wk' * x
-    v = attn.wv' * x
+function training_aware_reshape(x, args...)
+    if size(x, 2) !== 1
+        return reshape(x, args...)
+    end
+    reshape(x, args[1:2])
+end
 
-    head_size, n_heads = (64, 8) # attn.head_size, attn.n_heads # (64, 8)
-    q_reshaped = reshape(q, head_size, n_heads)
-    k_reshaped = reshape(k, head_size, n_heads)
-    
-    # apply RoPE rotation to the q and k vectors for each head
-    q_ = rope2(q_reshaped, pos)
-    k_ = rope2(k_reshaped, 1:pos)
+function training_aware_attention(attn, q::AbstractArray{T, 4}, k, v, args...) where T
+    q_permute = permutedims(q, (1, 3, 2, 4))
+    k_permute = permutedims(k, (1, 3, 2, 4))
+    v_permute = permutedims(v, (1, 3, 2, 4))
 
-    # multihead attention
-    att = attention_weights2(pos, k_, q_)
+    xb, alpha = NNlib.dot_product_attention(q_permute, k_permute, v_permute, nheads = attn.n_heads)
+    permutedims(xb, (1, 3, 2, 4))
+end
+
+function training_aware_attention(attn, q, k, v, pos, kv, head_size)
+    att = attention_weights2(pos, k, q)
     att = att ./ sqrt(Float32(head_size))
-    att = Flux.softmax(att)
-
+    att = Flux.softmax(att, dims = 1)
 
     Flux.Zygote.ignore() do
         myview = @view kv.value_cache[pos, :, :]
         copyto!(myview, v)
     end
 
-    # weighted sum of the values
     xb = combine_values2(kv.value_cache, att)
+end
+
+function (attn::AttentionLayer)(x, kv, pos)
+    # seq_len, batch_size = size(x)
+
+    head_size = attn.dim ÷ attn.n_heads
+    q = attn.wq * x
+    k = attn.wk * x
+    v = attn.wv * x
+
+    q_reshaped = training_aware_reshape(q, head_size, attn.n_heads, attn.seq_len, :) # head_size, n_heads, seq_len, batch_size
+    k_reshaped = training_aware_reshape(k, head_size, attn.n_heads, attn.seq_len, :)
+    v_reshaped = training_aware_reshape(v, head_size, attn.n_heads, attn.seq_len, :)
+
+    # apply RoPE rotation to the q and k vectors for each head
+    q_ = training_aware_rope2(q_reshaped, pos)
+    k_ = training_aware_rope2(k_reshaped, 1:pos)
+
+    xb = training_aware_attention(attn, q_, k_, v_reshaped, pos, kv, head_size)
 
     # final matmul to get the output of the attention
-    xb2 = attn.wo' * vec(xb)
-
+    xb2 = attn.wo * reshape(xb, attn.dim, :)
     xb2
+end
+
+function training_aware_attention_slice(q, pos)
+    1:pos
+end
+function training_aware_attention_slice(q::AbstractArray{T, 4}, pos) where T
+    1:size(q, 3)
 end
 
 attention_weights2(att, key_cache, q) = attention_weights2(size(att, 1), key_cache, q)
 function attention_weights2(pos::Int, key_cache, q)
-    # size(att) = pos x n_heads
-    t = pos # size(att, 1)
-    # dot product over attention span
-    c = map(x -> sum(q .* x, dims = 1), eachslice(key_cache[:,:,1:t], dims = 3))
+    slicedims = training_aware_attention_slice(q, pos)
+    c = map(eachslice(key_cache[:,:,slicedims,:], dims = 3)) do x
+        f..., batch_dim = size(x)
+        x_ = reshape(x, f..., 1, batch_dim)
+        sum(q .* x_, dims = 1)
+    end
     reduce(vcat, c)
 end
 
@@ -244,15 +289,13 @@ end
 function (layer::TransformerLayer)(x, kv, pos, idx)
     # attention rmsnorm
     xb = layer.attention_rms(x)
-
+    
     kv_layer = kv[idx]
-    xb2 = layer.attention(xb, kv_layer, pos)
-
+    att = layer.attention(xb, kv_layer, pos)
     # residual connection back into x
-    x2 = x .+ xb2
+    x2 = x .+ att
 
     # ffn rmsnorm
-    # rmsnorm!(s.xb, x, w.rms_ffn_weight)
     xb_norm = layer.ffn.norm(x2)
     
     # F.silu silu(x)=x*σ(x),where σ(x) is the logistic sigmoid
@@ -265,27 +308,26 @@ function (layer::TransformerLayer)(x, kv, pos, idx)
     xb_out = layer.ffn.layers[2](hb .* hb2)
 
     # residual connection
-    (x .+ xb_out, kv, pos)
+    (x2 .+ xb_out, kv, pos)
 end
 
 function (t::NewTransformerModel)((x, kv, pos))
-    for (idx, layer) in enumerate(t.chain)
+    for (idx, layer) in enumerate(t.chain[1:1])
         x, kv, pos = layer((x, kv, pos, idx))
     end
     (x, kv, pos)
 end
 
 function (fm::FullModel)(x, kv, pos)
+    x_emb = fm.token_embedding_table(x)
     transformer = fm.transformer_layers
-    x, _, _ = transformer((x, kv, pos))
-    x_norm = rmsnorm(x, model.rms_final_weight)
+    out, _, _ = transformer((x_emb, kv, pos))
+    x_norm = rmsnorm(out, fm.rms_final_weight)
 
-    # classifier into logits
-    logits = model.output_weight' * x_norm
+    logits = fm.output_weight' * x_norm
 end
 
 @views function transformer!(token::Int, pos::Int, config::ModelConfig, s::RunState, model::FullModel)
-    global gs = s
     x = s.x
 
     (;
@@ -298,12 +340,10 @@ end
     head_size = dim ÷ n_heads
 
     # copy the token embedding into x
-    dequantize!(x, model.token_embedding_table[:, token])
+    dequantize!(x, model.token_embedding_table.weight[:, token])
 
     transformer = model.transformer_layers
-    # kv = s.kvcache_layers[1]
     kv = s.kvcache_layers
-    global gkv = kv
 
     # forward all the layers
     x, _, _ = transformer((x, kv, pos))
